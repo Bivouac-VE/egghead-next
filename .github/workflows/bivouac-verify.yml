@@ -1,0 +1,64 @@
+name: Bivouac verify
+
+on:
+  push:
+    branches: [bivouac-ci]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [main, bivouac/axios-0.33]
+    runs-on: ubuntu-24.04
+    env:
+      CFLAGS: -Wno-error=incompatible-pointer-types
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.17.1'
+      - name: Install
+        run: |
+          if [ "${{ matrix.ref }}" = "main" ]; then pnpm install --frozen-lockfile; else pnpm install --no-frozen-lockfile; fi
+      - name: Commit updated lockfile to fix branch
+        if: matrix.ref != 'main'
+        run: |
+          if ! git diff --quiet pnpm-lock.yaml; then
+            git config user.name "Bivouac"
+            git config user.email "hello@getbivouac.com"
+            git commit -m "chore(deps-dev): update pnpm-lock.yaml for axios 0.33.0" pnpm-lock.yaml
+            git push origin HEAD:${{ matrix.ref }}
+          fi
+          pnpm why axios | head -40
+      - name: Typecheck
+        id: tsc
+        continue-on-error: true
+        run: npx tsc --noEmit -p . 2>&1 | tee tsc.txt; echo "TSC_ERRORS=$(grep -c 'error TS' tsc.txt)" >> $GITHUB_STEP_SUMMARY
+      - name: Tests
+        continue-on-error: true
+        run: pnpm test:ci 2>&1 | tail -60 | tee jest.txt
+      - name: Summary
+        run: |
+          echo "## ${{ matrix.ref }}" >> $GITHUB_STEP_SUMMARY
+          echo "TS errors: $(grep -c 'error TS' tsc.txt)" >> $GITHUB_STEP_SUMMARY
+          grep -E "^Tests:|^Test Suites:" jest.txt >> $GITHUB_STEP_SUMMARY || true
+          echo "::notice title=${{ matrix.ref }} tsc::$(grep -c 'error TS' tsc.txt) TS errors"
+          echo "::notice title=${{ matrix.ref }} jest::$(grep -E '^Tests:' jest.txt | tr -d '\n')"
+          grep 'error TS' tsc.txt | grep -i axios | head -20 | while read l; do echo "::warning title=${{ matrix.ref }} axios-tsc::$l"; done
+          grep 'error TS' tsc.txt | sort > tsc-sorted-${{ strategy.job-index }}.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ strategy.job-index }}
+          path: |
+            tsc.txt
+            jest.txt
